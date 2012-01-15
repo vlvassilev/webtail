@@ -1,16 +1,18 @@
 #!/usr/bin/env python
 
 """
-HTTP server that provides a web interface to run "tail" on a file (like
-the Unix command).
+HTTP server that provides a web interface to run "tail" on a file,
+like the Unix command.
 """
 
-__version__ = '0.0.1'
+__version__ = '0.1'
 __author__ = 'Santiago Coffey'
 __email__ = 'scoffey@playdom.com'
 
 import BaseHTTPServer
+import collections
 import logging
+import os
 import sys
 import urlparse
 
@@ -19,7 +21,10 @@ _STATIC_HTML = """<html>
 <title>Web Tail</title>
 <script type="text/javascript">
 
-function param(key, fallback) {
+var offset = 0;
+var polling = null;
+
+var param = function (key, fallback) {
     var query = window.location.search.substring(1);
     var parameters = query.split('&');
     for (var i = 0; i < parameters.length; i++) {
@@ -31,13 +36,8 @@ function param(key, fallback) {
     return fallback;
 }
 
-var offset = 0;
-var limit = parseInt(param('limit', 1000));
-var polling = null;
-
 var append = function (text) {
     if (text) {
-        offset += text.match(/\\n/g).length;
         var element = document.getElementById('tail');
         element.textContent += text;
         window.scrollTo(0, document.body.scrollHeight);
@@ -50,6 +50,8 @@ var request = function (uri, callback) {
     xhr.onreadystatechange = function () {
         var done = 4, ok = 200;
         if (xhr.readyState == done && xhr.status == ok) {
+            var newOffset = xhr.getResponseHeader('X-Seek-Offset');
+            if (newOffset) offset = parseInt(newOffset);
             callback(xhr.responseText);
         }
     };
@@ -57,14 +59,18 @@ var request = function (uri, callback) {
 }
 
 var tail = function () {
-    var uri = '/tail?offset=' + offset + '&limit=' + limit;
+    var uri = '/tail?offset=' + offset;
+    if (!offset) {
+        var limit = parseInt(param('limit', 1000));
+        uri += '&limit=' + limit;
+    }
     request(uri, append);
 }
 
 var refresh = function () {
     tail();
     if (polling == null) {
-        var interval = parseInt(param('offset', 5000));
+        var interval = parseInt(param('interval', 3000));
         polling = window.setInterval(tail, interval);
     }
 }
@@ -76,15 +82,9 @@ var sleep = function () {
     }
 }
 
-window.onload = function () {
-    request('/linecount', function (text) {
-        var linecount = parseInt(text);
-        offset = Math.max(0, linecount - limit);
-        window.onfocus = refresh;
-        window.onblur = sleep;
-        refresh();
-    });
-}
+window.onload = refresh;
+window.onfocus = refresh;
+window.onblur = sleep;
 
 </script>
 </head>
@@ -107,27 +107,34 @@ class WebTailHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         self.http_headers = {}
         routes = {
             '/': lambda request: _STATIC_HTML,
-            '/linecount': self._get_linecount,
-            '/tail': self._get_tail,
+            '/tail': self._get_tail
         }
-        url = urlparse.urlsplit(self.path)
-        request = dict(urlparse.parse_qsl(url.query))
-        handler = routes.get(url.path, lambda request: None)
-        body = handler(request)
-        self._serve(body, 400 if body is None else 200)
-
-    def _get_linecount(self, request):
-        count = self.linecount(self.filename)
-        logging.info('linecount(%r) returned %d', self.filename, count)
-        return str(count)
+        try:
+            url = urlparse.urlsplit(self.path)
+            request = dict(urlparse.parse_qsl(url.query))
+            if url.path in routes:
+                handler = routes[url.path]
+                body = handler(request)
+                self._serve(body, 200)
+            else: # not found
+                self._serve('', 400)
+        except Exception:
+            logging.exception('Failed to handle request at %s', self.path)
+            self._serve('', 500)
 
     def _get_tail(self, request):
-        offset = int(request.get('offset', 0))
-        limit = int(request.get('limit', 1000))
-        lines = self.tail(self.filename, offset, limit)
-        logging.info('tail(%r, %r, %r) returned %d lines', \
-                self.filename, offset, limit, len(lines))
+        size = os.stat(self.filename).st_size
         self.http_headers['Content-Type'] = 'text/plain'
+        self.http_headers['X-Seek-Offset'] = str(size)
+        offset = int(request.get('offset', 0))
+        limit = int(request.get('limit', 0)) or None
+        if size <= offset:
+            logging.info('tail returned empty string with stat optimization')
+            return ''
+        new_offset, lines = self.tail(self.filename, offset, limit)
+        logging.info('tail(%r, %r, %r) returned offset %d and %d lines', \
+                self.filename, offset, limit, new_offset, len(lines))
+        self.http_headers['X-Seek-Offset'] = str(new_offset)
         return ''.join(lines)
 
     def _serve(self, body, http_status=200):
@@ -140,27 +147,18 @@ class WebTailHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def linecount(self, filename):
-        """ Returns the number of lines in a file """
-        count = 0
-        stream = open(filename)
-        for line in stream:
-            count += 1
-        stream.close()
-        return count
-
-    def tail(self, filename, offset=0, limit=1000):
+    def tail(self, filename, offset=0, limit=None):
         """ Returns lines in a file (from given offset, up to limit lines) """
-        lines = []
-        maxlinenum = offset + limit
+        lines = collections.deque([], limit)
         stream = open(filename)
-        for linenum, line in enumerate(stream):
-            if linenum > maxlinenum or not line.endswith('\n'):
+        stream.seek(offset)
+        for line in stream:
+            if not line.endswith('\n'): # ignore last line if incomplete
                 break
-            if linenum >= offset:
-                lines.append(line)
+            lines.append(line)
+            offset += len(line)
         stream.close()
-        return lines
+        return (offset, lines)
 
     def log_request(self, code='-', size='-'):
         pass
@@ -181,7 +179,7 @@ class WebTailServer(BaseHTTPServer.HTTPServer):
                 self.process_request(request, client_address)
             except KeyboardInterrupt:
                 self.close_request(request)
-                raise
+                raise # pass on interruption in order to stop server
             except Exception:
                 self.handle_error(request, client_address)
                 self.close_request(request)
@@ -190,7 +188,7 @@ class WebTailServer(BaseHTTPServer.HTTPServer):
         logging.exception('Error while processing request from %s:%d', \
                 *client_address)
 
-def main(program, filename=None, port=4411, **kwargs):
+def main(program, filename=None, port=7411, **kwargs):
     """ Main program: Runs the web tail HTTP server """
     if filename is None:
         logging.error('No input file to tail')

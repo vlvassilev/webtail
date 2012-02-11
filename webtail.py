@@ -1,15 +1,29 @@
 #!/usr/bin/env python
+# -*- coding: utf-8 -*-
 
 """
 HTTP server that provides a web interface to run "tail" on a file,
 like the Unix command.
+
+This is a standalone script. No external dependencies required.
+
+How to invoke:
+
+    python webtail.py filename [port]
+
+Where:
+
+    - filename is the name of the file to "tail" (as in Unix tail).
+    - port is the port number where the webtail server will listen.
+
 """
 
-__version__ = '0.1'
+__version__ = '0.1.1'
 __author__ = 'Santiago Coffey'
-__email__ = 'scoffey@playdom.com'
+__email__ = 'scoffey@itba.edu.ar'
 
 import BaseHTTPServer
+import SocketServer
 import collections
 import logging
 import os
@@ -163,7 +177,7 @@ class WebTailHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
     def log_request(self, code='-', size='-'):
         pass
 
-class WebTailServer(BaseHTTPServer.HTTPServer):
+class WebTailServer(SocketServer.ThreadingMixIn, BaseHTTPServer.HTTPServer):
     """ Web tail server.
 
         Only differs from BaseHTTPServer.HTTPServer in the handling of

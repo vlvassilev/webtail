@@ -21,7 +21,7 @@ Where:
 
 """
 
-__version__ = '0.2.0'
+__version__ = '0.2.1'
 __author1__ = 'Santiago Coffey'
 __email1__ = 'scoffey@itba.edu.ar'
 __author2__ = 'Vladimir Vassilev'
@@ -105,7 +105,7 @@ var sleep = function () {
 
 window.onload = refresh;
 window.onfocus = refresh;
-window.onblur = sleep;
+window.onblur = refresh;
 
 </script>
 </head>
@@ -186,6 +186,7 @@ class WebTailHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
             lines.append(line)
             offset += len(line)
         stream.close()
+
         return (offset, lines)
 
     def log_request(self, code='-', size='-'):
@@ -220,11 +221,11 @@ class WebTailServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 def main(program, interface="127.0.0.1", port=7411, filename=None, **kwargs):
     """ Main program: Runs the web tail HTTP server """
 
+    WebTailHTTPRequestHandler.filename = filename
     if filename is None:
         logging.info('No input filename specified on command line. Using filename parameter from requests instead!!!')
 
     try:
-        WebTailHTTPRequestHandler.filename = filename
         Handler = WebTailHTTPRequestHandler
         with socketserver.TCPServer((interface, int(port)), Handler) as httpd:
             print("Starting tail ...")

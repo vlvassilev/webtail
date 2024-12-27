@@ -9,26 +9,33 @@ This is a standalone script. No external dependencies required.
 
 How to invoke:
 
-    python webtail.py filename [port]
+    python3 webtail.py interface port [filename]
 
 Where:
 
-    - filename is the name of the file to "tail" (as in Unix tail).
+    - interface is the network interface address to listen on e.g. 127.0.0.1, 0.0.0.0, localhost
     - port is the port number where the webtail server will listen.
+    - filename is the name of the file to "tail" (as in Unix tail).
+        if omitted the script will accept any filename specified in the request
+        e.g. ...&filename=/tmp/mylog.txt&... 
 
 """
 
-__version__ = '0.1.1'
-__author__ = 'Santiago Coffey'
-__email__ = 'scoffey@itba.edu.ar'
+__version__ = '0.2.0'
+__author1__ = 'Santiago Coffey'
+__email1__ = 'scoffey@itba.edu.ar'
+__author2__ = 'Vladimir Vassilev'
+__email2__ = 'vladimir@lightside-instruments.com'
 
-import BaseHTTPServer
-import SocketServer
+import http.server
+import socketserver
 import collections
 import logging
 import os
 import sys
-import urlparse
+#import urlparse
+import urllib
+
 
 _STATIC_HTML = """<html>
 <head>
@@ -73,7 +80,7 @@ var request = function (uri, callback) {
 }
 
 var tail = function () {
-    var uri = '/tail?offset=' + offset;
+    var uri = '/tail?filename='+param('filename', "none")+'&offset=' + offset;
     if (!offset) {
         var limit = parseInt(param('limit', 1000));
         uri += '&limit=' + limit;
@@ -84,7 +91,7 @@ var tail = function () {
 var refresh = function () {
     tail();
     if (polling == null) {
-        var interval = parseInt(param('interval', 3000));
+        var interval = parseInt(param('interval', 1000));
         polling = window.setInterval(tail, interval);
     }
 }
@@ -110,7 +117,7 @@ window.onblur = sleep;
 </html>
 """
 
-class WebTailHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
+class WebTailHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
     """ Request handler for the web tail server """
 
     protocol_version = 'HTTP/1.1'
@@ -124,9 +131,10 @@ class WebTailHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             '/tail': self._get_tail
         }
         try:
-            url = urlparse.urlsplit(self.path)
-            request = dict(urlparse.parse_qsl(url.query))
+            url = urllib.parse.urlsplit(self.path)
+            request = dict(urllib.parse.parse_qsl(url.query))
             if url.path in routes:
+                print("filename=%s"%(request.get('filename', 0)))
                 handler = routes[url.path]
                 body = handler(request)
                 self._serve(body, 200)
@@ -137,7 +145,13 @@ class WebTailHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             self._serve('', 500)
 
     def _get_tail(self, request):
-        size = os.stat(self.filename).st_size
+
+        if(self.filename==None):
+            filename = request.get('filename', "")
+        else:
+            filename = self.filename
+
+        size = os.stat(filename).st_size
         self.http_headers['Content-Type'] = 'text/plain'
         self.http_headers['X-Seek-Offset'] = str(size)
         offset = int(request.get('offset', 0))
@@ -145,9 +159,9 @@ class WebTailHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         if size <= offset:
             logging.info('tail returned empty string with stat optimization')
             return ''
-        new_offset, lines = self.tail(self.filename, offset, limit)
+        new_offset, lines = self.tail(filename, offset, limit)
         logging.info('tail(%r, %r, %r) returned offset %d and %d lines', \
-                self.filename, offset, limit, new_offset, len(lines))
+                filename, offset, limit, new_offset, len(lines))
         self.http_headers['X-Seek-Offset'] = str(new_offset)
         return ''.join(lines)
 
@@ -156,10 +170,10 @@ class WebTailHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         self.http_headers.setdefault('Content-Type', 'text/html')
         self.http_headers.setdefault('Content-Length', len(body))
         self.http_headers.setdefault('Connection', 'keep-alive')
-        for k, v in self.http_headers.iteritems():
+        for k, v in self.http_headers.items():
             self.send_header(k, v)
         self.end_headers()
-        self.wfile.write(body)
+        self.wfile.write(body.encode())
 
     def tail(self, filename, offset=0, limit=None):
         """ Returns lines in a file (from given offset, up to limit lines) """
@@ -177,10 +191,10 @@ class WebTailHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
     def log_request(self, code='-', size='-'):
         pass
 
-class WebTailServer(SocketServer.ThreadingMixIn, BaseHTTPServer.HTTPServer):
+class WebTailServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     """ Web tail server.
 
-        Only differs from BaseHTTPServer.HTTPServer in the handling of
+        Only differs from http.server.HTTPServer in the handling of
         exceptions while processing requests. """
 
     def _handle_request_noblock(self):
@@ -202,17 +216,20 @@ class WebTailServer(SocketServer.ThreadingMixIn, BaseHTTPServer.HTTPServer):
         logging.exception('Error while processing request from %s:%d', \
                 *client_address)
 
-def main(program, filename=None, port=7411, **kwargs):
+
+def main(program, interface="127.0.0.1", port=7411, filename=None, **kwargs):
     """ Main program: Runs the web tail HTTP server """
+
     if filename is None:
-        logging.error('No input file to tail')
-        return
+        logging.info('No input filename specified on command line. Using filename parameter from requests instead!!!')
+
     try:
         WebTailHTTPRequestHandler.filename = filename
-        server_address = ('', int(port))
-        httpd = WebTailServer(server_address, WebTailHTTPRequestHandler)
-        logging.info('Starting HTTP server at port %d', server_address[1])
-        httpd.serve_forever()
+        Handler = WebTailHTTPRequestHandler
+        with socketserver.TCPServer((interface, int(port)), Handler) as httpd:
+            print("Starting tail ...")
+            print("Serving at: http://%(interface)s:%(port)s" % dict(interface=interface or "localhost", port=port))
+            httpd.serve_forever()
     except KeyboardInterrupt:
         logging.info('HTTP server stopped')
 
